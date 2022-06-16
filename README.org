@@ -25,43 +25,29 @@ Clone the repository and install the requirements.
   pip install -r requirements.txt
 #+end_src
 Then copy the =oauth2ms= file to any location in your =$PATH=.
-** XDG CONFIG HOME
-   For the app to locate your config file, the =$XDG_CONFIG_HOME= environment variable must be set.
-   It is generally set to =$HOME/.config=.
 
 * Usage
-Create a config file with the below details at =$XDG_CONFIG_HOME/oauth2ms/config.json=
+Create a key in =pass= with the below details at =$XDG_CONFIG_HOME/oauth2ms/config.json=
 #+begin_src json
-  {
-      "tenant_id": "TENANT_ID",
-      "client_id": "CLIENT_ID",
-      "client_secret": "CLIENT_SECRET",
-      "redirect_host": "localhost",
-      "redirect_port": "5000",
-      "redirect_path": "/getToken/",
-      "scopes": ["https://outlook.office.com/IMAP.AccessAsUser.All"]
-  }
+
+authority: https://login.microsoftonline.com/TENANT_ID
+client_id: CLIENT_ID
+client_secret: TENANT_SECRET
+redirect_uri: http://localhost:5000/getToken
+scopes: https://outlook.office.com/IMAP.AccessAsUser.All
+scopes: https://outlook.office.com/SMTP.Send
 #+end_src
-If you aren't sure how to fetch the the TENANT_ID, CLIENT_ID and CLIENT_SECRET values, read more on [[file:steps.org][steps.org]].
-After creating the config file, execute =oauth2ms=, it should pop up a browser window asking you to login.
-Once logged it, it should redirect you to a page which says "Authorization complete.". On the terminal you should
-see the token printed. Subsequent fetches should use the refresh token to get the access token. Call =oauth2ms= with
-the ~--encode-xoauth2~ to get the token in [[https://docs.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth#sasl-xoauth2][XOAUTH2 format]].
+If you aren't sure how to fetch the the TENANT_ID, CLIENT_ID and CLIENT_SECRET
+values, read more on [[file:steps.org][steps.org]]. After creating the config file, execute
+=oauth2ms= and specify =--auth-key= and =--token-key= , it should pop up a
+browser window asking you to login. Once logged it, it should redirect you to
+a page which says "Authorization complete.". On the terminal you should see
+the token printed. Subsequent fetches should use the refresh token to get the
+access token. Call =oauth2ms= with the ~--encode-xoauth2~ to get the token in
+[[https://docs.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth#sasl-xoauth2][XOAUTH2 format]].
 #+begin_src sh
-  oauth2ms --encode-xoauth2
+  oauth2ms --auth-key AUTH_KEY --token-key TOKEN_KEY --encode-xoauth2
 #+end_src
 Optionally, you can add "https://outlook.office.com/SMTP.Send"
 to the list of scopes to use the token for stmp. See [[steps.org]] for information on configuring emacs for sending mail
 via smtp with xoauth2.
-
-** Encryption
-Encryption of the fetched token cache can be enabled using the =-e= (=--encrypt-using-fingerprint=) option. The option takes the
-email/fingerprint to identify the gpg key to use for encrypting and decrypting the token cache.
-#+begin_src sh
-  oauth2ms -e <gpg recipient fingerprint>
-#+end_src
-
-* TODOS
-- [x] Use gpg to encrypt the fetched data
-- [ ] Add support for encrypted config.json
-- [ ] Support more than one account at a time

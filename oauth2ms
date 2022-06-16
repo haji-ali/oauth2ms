@@ -163,9 +163,9 @@ https://docs.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--auth-key", action="store", default="oauth2ms",
-                        help="Path to pass key where all info is stored")
+                        help="Path to pass key which contains authentication credentials.")
     parser.add_argument("--token-key", action="store", default="oauth2ms",
-                        help="Path to pass key where all info is stored")
+                        help="Path to pass key where the access token will be stored.")
     parser.add_argument("--encode-xoauth2", action="store_true", default=False,
                         help="Print xoauth2 encoded token instead of the plain token")
     parser.add_argument("--no-browser", action="store_true", default=False,
