@@ -1,3 +1,4 @@
 pyxdg
 msal
+passpy
 python-gnupg>=0.4.6
