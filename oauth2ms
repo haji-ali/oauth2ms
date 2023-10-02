@@ -10,25 +10,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from xdg.BaseDirectory import save_data_path
 import argparse
 import webbrowser
-import json
 import msal
-
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs, urlencode
-from wsgiref import simple_server
-import wsgiref.util
 import git
 import sys
 import uuid
 import os
 import base64
-import gnupg
 import io
 import passpy
-import urllib
+import http.server
+import ssl
+from urllib.parse import urlparse, parse_qs, urlencode
 
 def parse_key(key):
     # Copied from pass_import/managers/passwordstore.py
@@ -64,65 +58,83 @@ def parse_key(key):
             entry['comments'] += '\n' + line
     return entry
 
-class WSGIRequestHandler(wsgiref.simple_server.WSGIRequestHandler):
-    """Silence out the messages from the http server"""
+class HTTPSHandlerData(object):
+    SUCCESS_MESSAGE = "Authorization complete."
+    def __init__(self):
+        self.last_request_uri = None
+
+    def __call__(self, request):
+        self.last_request_uri = request.path
+        request.send_response(200)
+        request.send_header("Content-type", "text/html")
+        request.end_headers()
+        request.wfile.write(HTTPSHandlerData.SUCCESS_MESSAGE.encode("utf-8"))
+
+class HTTPSHandler(http.server.BaseHTTPRequestHandler):
+    def __init__(self, data, *args):
+        self.data = data
+        super().__init__(self, *args)
+
     def log_message(self, format, *args):
         pass
 
-class WSGIRedirectionApp(object):
-    """WSGI app to handle the authorization redirect.
-    Stores the request URI and displays the given success message.
-    """
-    SUCCESS_MESSAGE = "Authorization complete."
-    def __init__(self, message):
-        self.last_request_uri = None
-        self._success_message = message
-
-    def __call__(self, environ, start_response):
-        start_response("200 OK", [("Content-type", "text/plain; charset=utf-8")])
-        self.last_request_uri = wsgiref.util.request_uri(environ)
-        return [self._success_message.encode("utf-8")]
+    def do_GET(self):
+        self.data(self)
 
 def build_msal_app(config, cache=None):
+    if 'client_secret' in config:
     return msal.ConfidentialClientApplication(
         config['client_id'],
         authority=config['authority'],
         client_credential=config['client_secret'],
         token_cache=cache)
+    return msal.PublicClientApplication(config['client_id'],
+                                        authority=config['authority'],
+                                        token_cache=cache)
 
 def build_new_app_state(config, no_browser=False):
     cache = msal.SerializableTokenCache()
     state = str(uuid.uuid4())
+    uri = config["redirect_uri"]
     auth_url = build_msal_app(config, cache).get_authorization_request_url(
         config['scopes'],
         state=state,
-        redirect_uri=config["redirect_uri"])
-    wsgi_app = WSGIRedirectionApp(WSGIRedirectionApp.SUCCESS_MESSAGE)
-    redirect_host, redirect_port = urllib.parse.urlparse(
-        config["redirect_uri"]).netloc.split(":")
-    http_server = simple_server.make_server(redirect_host,
-                                            int(redirect_port),
-                                            wsgi_app,
-                                            handler_class=WSGIRequestHandler)
+        redirect_uri=uri)
+    redirect_host, redirect_port = urlparse(uri).netloc.split(":")
+    data = HTTPSHandlerData()
+
+    def handler_class(*args):
+        return HTTPSHandler(data, *args)
+
+    http_server = http.server.HTTPServer((redirect_host, int(redirect_port)),
+                                         handler_class)
+
+    if uri.starts_with("https"):
+        # Genered server.pem with:
+        # openssl req -new -x509 -keyout server.pem -out server.pem -days 365 -nodes
+        server_pem = "/Users/ah180/Downloads/server.pem"
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(certfile=server_pem, keyfile=server_pem)
+
+        http_server.socket = ssl_context.wrap_socket(http_server.socket,
+                                                     server_side=True)
+
     if no_browser:
         print("Please navigate to this url: " + auth_url, file=sys.stderr)
     else:
         webbrowser.open(auth_url, new=2, autoraise=True)
 
     http_server.handle_request()
-    auth_response = wsgi_app.last_request_uri
     http_server.server_close()
-    parsed_auth_response = parse_qs(auth_response)
 
-    code_key = config["redirect_uri"] + "?code"
+    parsed_auth_response = parse_qs(data.last_request_uri)
+    code_key = "/?code"
     if code_key not in parsed_auth_response:
         return None
 
     auth_code = parsed_auth_response[code_key]
     result = build_msal_app(config, cache).acquire_token_by_authorization_code(
-        auth_code,
-        scopes=config['scopes'],
-        redirect_uri=config["redirect_uri"]);
+        auth_code, scopes=config['scopes'], redirect_uri=uri)
 
     if result.get("access_token") is None:
         print("Something went wrong during authorization", file=sys.stderr)
@@ -138,7 +150,7 @@ def build_app_state_from_credentials(credentials, config):
         cache = msal.SerializableTokenCache()
         cache.deserialize(credentials)
     except:
-        print("Not a valild json file or it is ecrypted. Maybe add/remove the -e arugment?", file=sys.stderr)
+        print("Not a valid cache file", file=sys.stderr)
         sys.exit(1)
 
     return {"config":config, "cache":cache}
@@ -169,14 +181,13 @@ def main():
     parser.add_argument("--encode-xoauth2", action="store_true", default=False,
                         help="Print xoauth2 encoded token instead of the plain token")
     parser.add_argument("--no-browser", action="store_true", default=False,
-                        help="Don't open a browser with URL. Instead print the URL. Useful inside virtualized environments like WSL.")
+                        help="Don't open a browser with URL. Instead print the URL.")
 
     cmdline_args = parser.parse_args()
     pass_store = passpy.Store()
 
     config = parse_key(pass_store.get_key(cmdline_args.auth_key))
-    required_keys = ["authority", "client_id", "redirect_uri", "scopes",
-                     "client_secret"]
+    required_keys = ["authority", "client_id", "redirect_uri", "scopes"]
     if (config is None or not all([x in config for x in required_keys])):
         print("Invalid config\nConfig must contain the keys: {}".format(required_keys),
               file=sys.stderr)
@@ -190,16 +201,20 @@ def main():
         cca = build_msal_app(app_state['config'], app_state['cache'])
         accounts = cca.get_accounts()
         if accounts:
-            token = cca.acquire_token_silent(config['scopes'],
-                                             account=accounts[0])["access_token"]
+            token = cca.acquire_token_silent(
+                config['scopes'], account=accounts[0])["access_token"]
+        else:
+            print("No accounts in cache?!", file=sys.stderr)
+            sys.exit(1)
     except FileNotFoundError:
         pass
 
     if app_state is None:
-        app_state, token = build_new_app_state(config, cmdline_args.no_browser)
+        retVal = build_new_app_state(config, cmdline_args.no_browser)
         if app_state is None:
             print("Something went wrong!", file=sys.stderr)
             sys.exit(1)
+        app_state, token = retVal
 
     if cmdline_args.encode_xoauth2:
         print(encode_xoauth2(app_state, token))
