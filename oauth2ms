@@ -23,6 +23,7 @@ import passpy
 import http.server
 import ssl
 from urllib.parse import urlparse, parse_qs, urlencode
+from xdg.BaseDirectory import load_data_paths
 
 def parse_key(key):
     # Copied from pass_import/managers/passwordstore.py
@@ -114,7 +115,7 @@ def build_new_app_state(config, no_browser=False):
     if uri.startswith("https"):
         # Genered server.pem with:
         # openssl req -new -x509 -keyout server.pem -out server.pem -days 365 -nodes
-        server_pem = "/Users/ah180/Downloads/server.pem"
+        server_pem = next(load_data_paths("ssl/certs/oauth2_server.pem"))
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(certfile=server_pem, keyfile=server_pem)
 
