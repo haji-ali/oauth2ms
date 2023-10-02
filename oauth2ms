@@ -73,7 +73,7 @@ class HTTPSHandlerData(object):
 class HTTPSHandler(http.server.BaseHTTPRequestHandler):
     def __init__(self, data, *args):
         self.data = data
-        super().__init__(self, *args)
+        super().__init__(*args)
 
     def log_message(self, format, *args):
         pass
@@ -83,11 +83,11 @@ class HTTPSHandler(http.server.BaseHTTPRequestHandler):
 
 def build_msal_app(config, cache=None):
     if 'client_secret' in config:
-    return msal.ConfidentialClientApplication(
-        config['client_id'],
-        authority=config['authority'],
-        client_credential=config['client_secret'],
-        token_cache=cache)
+        return msal.ConfidentialClientApplication(
+            config['client_id'],
+            authority=config['authority'],
+            client_credential=config['client_secret'],
+            token_cache=cache)
     return msal.PublicClientApplication(config['client_id'],
                                         authority=config['authority'],
                                         token_cache=cache)
@@ -100,7 +100,9 @@ def build_new_app_state(config, no_browser=False):
         config['scopes'],
         state=state,
         redirect_uri=uri)
-    redirect_host, redirect_port = urlparse(uri).netloc.split(":")
+    parsed_uri = urlparse(uri)
+    redirect_host, redirect_port = parsed_uri.netloc.split(":")
+    uri_path = parsed_uri.path or "/"
     data = HTTPSHandlerData()
 
     def handler_class(*args):
@@ -109,7 +111,7 @@ def build_new_app_state(config, no_browser=False):
     http_server = http.server.HTTPServer((redirect_host, int(redirect_port)),
                                          handler_class)
 
-    if uri.starts_with("https"):
+    if uri.startswith("https"):
         # Genered server.pem with:
         # openssl req -new -x509 -keyout server.pem -out server.pem -days 365 -nodes
         server_pem = "/Users/ah180/Downloads/server.pem"
@@ -128,7 +130,7 @@ def build_new_app_state(config, no_browser=False):
     http_server.server_close()
 
     parsed_auth_response = parse_qs(data.last_request_uri)
-    code_key = "/?code"
+    code_key = uri_path + "?code"
     if code_key not in parsed_auth_response:
         return None
 
@@ -211,7 +213,7 @@ def main():
 
     if app_state is None:
         retVal = build_new_app_state(config, cmdline_args.no_browser)
-        if app_state is None:
+        if retVal is None:
             print("Something went wrong!", file=sys.stderr)
             sys.exit(1)
         app_state, token = retVal
