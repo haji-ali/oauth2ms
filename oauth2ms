@@ -59,19 +59,10 @@ def parse_key(key):
             entry['comments'] += '\n' + line
     return entry
 
-class HTTPSHandlerData(object):
+class HTTPSHandler(object):
     SUCCESS_MESSAGE = "Authorization complete."
-    def __init__(self):
-        self.last_request_uri = None
 
-    def __call__(self, request):
-        self.last_request_uri = request.path
-        request.send_response(200)
-        request.send_header("Content-type", "text/html")
-        request.end_headers()
-        request.wfile.write(HTTPSHandlerData.SUCCESS_MESSAGE.encode("utf-8"))
-
-class HTTPSHandler(http.server.BaseHTTPRequestHandler):
+    class HTTPSHandlerImpl(http.server.BaseHTTPRequestHandler):
     def __init__(self, data, *args):
         self.data = data
         super().__init__(*args)
@@ -81,6 +72,19 @@ class HTTPSHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.data(self)
+
+    def __init__(self):
+        self.last_request_uri = None
+
+    def __call__(self, request):
+        self.last_request_uri = request.path
+        request.send_response(200)
+        request.send_header("Content-type", "text/html")
+        request.end_headers()
+        request.wfile.write(HTTPSHandler.SUCCESS_MESSAGE.encode("utf-8"))
+
+    def handler_class(self):
+        return lambda *args: HTTPSHandler.HTTPSHandlerImpl(self, *args)
 
 def build_msal_app(config, cache=None):
     if 'client_secret' in config:
@@ -97,20 +101,17 @@ def build_new_app_state(config, no_browser=False):
     cache = msal.SerializableTokenCache()
     state = str(uuid.uuid4())
     uri = config["redirect_uri"]
-    auth_url = build_msal_app(config, cache).get_authorization_request_url(
-        config['scopes'],
+    msal_app = build_msal_app(config, cache)
+    auth_url = msal_app.get_authorization_request_url(config['scopes'],
         state=state,
         redirect_uri=uri)
     parsed_uri = urlparse(uri)
     redirect_host, redirect_port = parsed_uri.netloc.split(":")
     uri_path = parsed_uri.path or "/"
-    data = HTTPSHandlerData()
 
-    def handler_class(*args):
-        return HTTPSHandler(data, *args)
-
+    data = HTTPSHandler()
     http_server = http.server.HTTPServer((redirect_host, int(redirect_port)),
-                                         handler_class)
+                                         data.handler_class())
 
     if uri.startswith("https"):
         # Genered server.pem with:
@@ -132,20 +133,20 @@ def build_new_app_state(config, no_browser=False):
 
     parsed_auth_response = parse_qs(data.last_request_uri)
     code_key = uri_path + "?code"
+    app_state = {"config":config, "cache":cache}
     if code_key not in parsed_auth_response:
-        return None
+        return (app_state, None)
 
     auth_code = parsed_auth_response[code_key]
-    result = build_msal_app(config, cache).acquire_token_by_authorization_code(
+    result = msal_app.acquire_token_by_authorization_code(
         auth_code, scopes=config['scopes'], redirect_uri=uri)
 
     if result.get("access_token") is None:
         print("Something went wrong during authorization", file=sys.stderr)
         print("Server returned: {}".format(result), file=sys.stderr)
-        return None
+        return (app_state, None)
 
-    return ({"config":config, "cache":cache},
-            result["access_token"])
+    return (app_state, result["access_token"])
 
 def build_app_state_from_credentials(credentials, config):
     # Make sure it is a valid json object
@@ -163,11 +164,10 @@ def encode_xoauth2(app, token):
     Encode the xoauth 2 message based on:
 https://docs.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth#sasl-xoauth2
     """
-    config = app['config']
-    cache = app['cache']
+    config, cache = app['config'], app['cache']
     cca = build_msal_app(config, cache)
-    accounts = cca.get_accounts()
-    username = accounts[0]["username"]
+    username = cca.get_accounts()[0]["username"]
+
     C_A = b'\x01'
     user = ("user=" + username).encode("ascii")
     btoken = ("auth=Bearer " + token).encode("ascii")
@@ -213,11 +213,10 @@ def main():
         pass
 
     if app_state is None:
-        retVal = build_new_app_state(config, cmdline_args.no_browser)
-        if retVal is None:
+        app_state, token = build_new_app_state(config, cmdline_args.no_browser)
+        if token is None:
             print("Something went wrong!", file=sys.stderr)
             sys.exit(1)
-        app_state, token = retVal
 
     if cmdline_args.encode_xoauth2:
         print(encode_xoauth2(app_state, token))

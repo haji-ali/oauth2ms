@@ -11,7 +11,7 @@
 - [[#todos][TODOS]]
 
 * Overview
-This tool can be used to fetch oauth2 tokens from the microsoft identity endpoint.
+This tool can be used to fetch oauth2 tokens from the Microsoft identity endpoint.
 Additionally, it can encode the token in the [[https://docs.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth#sasl-xoauth2][XOAUTH2 format]] to be used as authentication in IMAP mail servers.
 Example configuration for emacs given in [[steps.org]].
 
