@@ -202,17 +202,20 @@ def main():
         cache_key = pass_store.get_key(cmdline_args.token_key)
         app_state = build_app_state_from_credentials(cache_key, config)
         cca = build_msal_app(app_state['config'], app_state['cache'])
+        if cca is not None:
         accounts = cca.get_accounts()
-        if accounts:
+            if accounts is not None:
             token = cca.acquire_token_silent(
-                config['scopes'], account=accounts[0])["access_token"]
+                    config['scopes'], account=accounts[0])
+                if token is not None:
+                    token = token["access_token"]
         else:
             print("No accounts in cache?!", file=sys.stderr)
             sys.exit(1)
     except FileNotFoundError:
         pass
 
-    if app_state is None:
+    if app_state is None or token is None:
         app_state, token = build_new_app_state(config, cmdline_args.no_browser)
         if token is None:
             print("Something went wrong!", file=sys.stderr)
