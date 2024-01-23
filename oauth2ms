@@ -63,15 +63,15 @@ class HTTPSHandler(object):
     SUCCESS_MESSAGE = "Authorization complete."
 
     class HTTPSHandlerImpl(http.server.BaseHTTPRequestHandler):
-    def __init__(self, data, *args):
-        self.data = data
-        super().__init__(*args)
+        def __init__(self, data, *args):
+            self.data = data
+            super().__init__(*args)
 
-    def log_message(self, format, *args):
-        pass
+        def log_message(self, format, *args):
+            pass
 
-    def do_GET(self):
-        self.data(self)
+        def do_GET(self):
+            self.data(self)
 
     def __init__(self):
         self.last_request_uri = None
@@ -103,8 +103,8 @@ def build_new_app_state(config, no_browser=False):
     uri = config["redirect_uri"]
     msal_app = build_msal_app(config, cache)
     auth_url = msal_app.get_authorization_request_url(config['scopes'],
-        state=state,
-        redirect_uri=uri)
+                                                      state=state,
+                                                      redirect_uri=uri)
     parsed_uri = urlparse(uri)
     redirect_host, redirect_port = parsed_uri.netloc.split(":")
     uri_path = parsed_uri.path or "/"
@@ -203,9 +203,9 @@ def main():
         app_state = build_app_state_from_credentials(cache_key, config)
         cca = build_msal_app(app_state['config'], app_state['cache'])
         if cca is not None:
-        accounts = cca.get_accounts()
+            accounts = cca.get_accounts()
             if accounts is not None:
-            token = cca.acquire_token_silent(
+                token = cca.acquire_token_silent(
                     config['scopes'], account=accounts[0])
                 if token is not None:
                     token = token["access_token"]
