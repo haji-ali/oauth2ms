@@ -11,39 +11,47 @@
 # limitations under the License.
 
 import argparse
+import contextlib
+import fcntl
 import webbrowser
 import msal
 import git
 import sys
+import time
 import uuid
 import os
 import base64
-import io
 import passpy
 import http.server
 import ssl
-from urllib.parse import urlparse, parse_qs, urlencode
-from xdg.BaseDirectory import load_data_paths
+from urllib.parse import urlparse, parse_qs
+from xdg.BaseDirectory import load_data_paths, save_cache_path
 
-def parse_key(key):
-    # Copied from pass_import/managers/passwordstore.py
-    # function show(.,.)
+# How long an interactive sign-in may wait for the browser's redirect.
+LOGIN_TIMEOUT = 300
+
+def fail(message):
+    print("oauth2ms: " + message, file=sys.stderr)
+    sys.exit(1)
+
+def parse_key(text):
+    """Parse a pass entry: the password, then `key: value' lines.
+
+    The first line is the password unless it is itself `key: value'. A
+    key given more than once collects its values in a list; any other
+    line is kept, in order, under `comments'.
+    """
     entry = {}
-    try:
-        data = key.split('\n')
-    except UnicodeDecodeError:
-        entry['data'] = self._command(['show', path], nline=False)
-        return entry
-
-    data.pop()
-    if data:
-        line = data.pop(0)
+    lines = text.splitlines()
+    if lines:
+        line = lines.pop(0)
         if ': ' in line:
             (key, value) = line.split(': ', 1)
             entry[key] = value
         else:
             entry['password'] = line
-    for line in data:
+    comments = []
+    for line in lines:
         if ': ' in line:
             (key, value) = line.split(': ', 1)
             if key in entry:
@@ -55,12 +63,15 @@ def parse_key(key):
                 entry[key] = value
         elif line.startswith('otpauth://'):
             entry['otpauth'] = line
-        elif 'comments' in entry:
-            entry['comments'] += '\n' + line
+        else:
+            comments.append(line)
+    if comments:
+        entry['comments'] = '\n'.join(comments)
     return entry
 
 class HTTPSHandler(object):
     SUCCESS_MESSAGE = "Authorization complete."
+    FAILURE_MESSAGE = "Authorization failed."
 
     class HTTPSHandlerImpl(http.server.BaseHTTPRequestHandler):
         def __init__(self, data, *args):
@@ -74,14 +85,21 @@ class HTTPSHandler(object):
             self.data(self)
 
     def __init__(self):
-        self.last_request_uri = None
+        self.params = None
 
     def __call__(self, request):
-        self.last_request_uri = request.path
+        params = parse_qs(urlparse(request.path).query)
+        if 'code' not in params and 'error' not in params:
+            # Not the redirect: the browser asking for a favicon, say.
+            request.send_error(404)
+            return
+        self.params = params
         request.send_response(200)
         request.send_header("Content-type", "text/html")
         request.end_headers()
-        request.wfile.write(HTTPSHandler.SUCCESS_MESSAGE.encode("utf-8"))
+        message = (HTTPSHandler.SUCCESS_MESSAGE if 'code' in params
+                   else HTTPSHandler.FAILURE_MESSAGE)
+        request.wfile.write(message.encode("utf-8"))
 
     def handler_class(self):
         return lambda *args: HTTPSHandler.HTTPSHandlerImpl(self, *args)
@@ -97,26 +115,43 @@ def build_msal_app(config, cache=None):
                                         authority=config['authority'],
                                         token_cache=cache)
 
+def wait_for_redirect(http_server, data):
+    """Serve requests until the redirect arrives or LOGIN_TIMEOUT passes."""
+    deadline = time.monotonic() + LOGIN_TIMEOUT
+    while data.params is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        http_server.timeout = remaining
+        http_server.handle_request()
+    return data.params
+
 def build_new_app_state(config, no_browser=False):
     cache = msal.SerializableTokenCache()
     state = str(uuid.uuid4())
     uri = config["redirect_uri"]
     msal_app = build_msal_app(config, cache)
+    app_state = {"config": config, "cache": cache, "app": msal_app}
     auth_url = msal_app.get_authorization_request_url(config['scopes'],
                                                       state=state,
                                                       redirect_uri=uri)
     parsed_uri = urlparse(uri)
-    redirect_host, redirect_port = parsed_uri.netloc.split(":")
-    uri_path = parsed_uri.path or "/"
+    redirect_port = parsed_uri.port or (443 if parsed_uri.scheme == "https"
+                                        else 80)
 
     data = HTTPSHandler()
-    http_server = http.server.HTTPServer((redirect_host, int(redirect_port)),
+    http_server = http.server.HTTPServer((parsed_uri.hostname, redirect_port),
                                          data.handler_class())
 
     if uri.startswith("https"):
         # Genered server.pem with:
         # openssl req -new -x509 -keyout server.pem -out server.pem -days 365 -nodes
-        server_pem = next(load_data_paths("ssl/certs/oauth2_server.pem"))
+        cert = "ssl/certs/oauth2_server.pem"
+        server_pem = next(load_data_paths(cert), None)
+        if server_pem is None:
+            http_server.server_close()
+            fail("{} not found under any XDG data directory, but the "
+                 "redirect URI is https".format(cert))
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(certfile=server_pem, keyfile=server_pem)
 
@@ -128,18 +163,27 @@ def build_new_app_state(config, no_browser=False):
     else:
         webbrowser.open(auth_url, new=2, autoraise=True)
 
-    http_server.handle_request()
-    http_server.server_close()
+    try:
+        params = wait_for_redirect(http_server, data)
+    finally:
+        http_server.server_close()
 
-    parsed_auth_response = parse_qs(data.last_request_uri)
-    code_key = uri_path + "?code"
-    app_state = {"config":config, "cache":cache}
-    if code_key not in parsed_auth_response:
+    if params is None:
+        print("No authorization within {}s".format(LOGIN_TIMEOUT),
+              file=sys.stderr)
+        return (app_state, None)
+    if params.get('state', [None])[0] != state:
+        # Not the answer to the request made above.
+        print("Authorization response has the wrong state", file=sys.stderr)
+        return (app_state, None)
+    if 'code' not in params:
+        print("Authorization failed: {}: {}".format(
+            params.get('error', ['?'])[0],
+            params.get('error_description', [''])[0]), file=sys.stderr)
         return (app_state, None)
 
-    auth_code = parsed_auth_response[code_key]
     result = msal_app.acquire_token_by_authorization_code(
-        auth_code, scopes=config['scopes'], redirect_uri=uri)
+        params['code'][0], scopes=config['scopes'], redirect_uri=uri)
 
     if result.get("access_token") is None:
         print("Something went wrong during authorization", file=sys.stderr)
@@ -153,20 +197,61 @@ def build_app_state_from_credentials(credentials, config):
     try:
         cache = msal.SerializableTokenCache()
         cache.deserialize(credentials)
-    except:
-        print("Not a valid cache file", file=sys.stderr)
-        sys.exit(1)
+    except (ValueError, TypeError):
+        fail("Not a valid cache file")
 
-    return {"config":config, "cache":cache}
+    return {"config": config, "cache": cache,
+            "app": build_msal_app(config, cache)}
 
-def encode_xoauth2(app, token):
+def cached_token(pass_store, key, config):
+    """Return (app_state, token) from the token cache stored under KEY.
+
+    The token is None when it cannot be had without signing in again,
+    and app_state too when there is no cache at all.
+    """
+    try:
+        credentials = pass_store.get_key(key)
+    except FileNotFoundError:
+        return (None, None)
+    app_state = build_app_state_from_credentials(credentials, config)
+    accounts = app_state['app'].get_accounts()
+    if not accounts:
+        print("No account in the token cache", file=sys.stderr)
+        return (app_state, None)
+    # Unlike acquire_token_silent, says why a refresh failed.
+    result = app_state['app'].acquire_token_silent_with_error(
+        config['scopes'], account=accounts[0])
+    if result is None:
+        return (app_state, None)
+    if "access_token" not in result:
+        print("Cannot refresh the token: {}: {}".format(
+            result.get("error"), result.get("error_description")),
+              file=sys.stderr)
+        return (app_state, None)
+    return (app_state, result["access_token"])
+
+@contextlib.contextmanager
+def token_lock(key):
+    """Hold KEY's token cache while it is read, refreshed and written back.
+
+    Callers such as mbsync and msmtp can run at once; each would refresh
+    and write its own cache, the last write winning.
+    """
+    path = os.path.join(save_cache_path("oauth2ms"),
+                        os.path.normpath(key).replace(os.sep, "%") + ".lock")
+    with open(path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+def encode_xoauth2(app_state, token):
     """
     Encode the xoauth 2 message based on:
 https://docs.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth#sasl-xoauth2
     """
-    config, cache = app['config'], app['cache']
-    cca = build_msal_app(config, cache)
-    username = cca.get_accounts()[0]["username"]
+    accounts = app_state['app'].get_accounts()
+    if not accounts:
+        fail("No account in the token cache to encode the token for")
+    username = accounts[0]["username"]
 
     C_A = b'\x01'
     user = ("user=" + username).encode("ascii")
@@ -203,50 +288,48 @@ def main():
                         help="Print xoauth2 encoded token instead of the plain token")
     parser.add_argument("--no-browser", action="store_true", default=False,
                         help="Don't open a browser with URL. Instead print the URL.")
+    parser.add_argument("--no-interactive", action="store_true", default=False,
+                        help="Fail instead of signing in again when the token "
+                        "cannot be refreshed: for use by mail programs, "
+                        "where nobody is around to complete a sign-in.")
 
     cmdline_args = parser.parse_args()
     pass_store = passpy.Store()
 
-    config = parse_key(pass_store.get_key(cmdline_args.auth_key))
+    auth = pass_store.get_key(cmdline_args.auth_key)
+    config = parse_key(auth) if auth is not None else None
     required_keys = ["authority", "client_id", "redirect_uri", "scopes"]
     if (config is None or not all([x in config for x in required_keys])):
-        print("Invalid config\nConfig must contain the keys: {}".format(required_keys),
-              file=sys.stderr)
-        sys.exit(1)
+        fail("Invalid config\nConfig must contain the keys: {}"
+             .format(required_keys))
+    if isinstance(config['scopes'], str):
+        # A single `scopes:' line, which may hold several.
+        config['scopes'] = config['scopes'].split()
 
-    token = None
-    app_state = None
-    try:
-        cache_key = pass_store.get_key(cmdline_args.token_key)
-        app_state = build_app_state_from_credentials(cache_key, config)
-        cca = build_msal_app(app_state['config'], app_state['cache'])
-        if cca is not None:
-            accounts = cca.get_accounts()
-            if accounts is not None:
-                token = cca.acquire_token_silent(
-                    config['scopes'], account=accounts[0])
-                if token is not None:
-                    token = token["access_token"]
-        else:
-            print("No accounts in cache?!", file=sys.stderr)
-            sys.exit(1)
-    except FileNotFoundError:
-        pass
-
-    if app_state is None or token is None:
-        app_state, token = build_new_app_state(config, cmdline_args.no_browser)
+    with token_lock(cmdline_args.token_key):
+        app_state, token = cached_token(pass_store, cmdline_args.token_key,
+                                        config)
         if token is None:
-            print("Something went wrong!", file=sys.stderr)
-            sys.exit(1)
+            if cmdline_args.no_interactive:
+                fail("No usable token in {}; run oauth2ms --auth-key {} "
+                     "--token-key {} to sign in again".format(
+                         cmdline_args.token_key, cmdline_args.auth_key,
+                         cmdline_args.token_key))
+            app_state, token = build_new_app_state(config,
+                                                   cmdline_args.no_browser)
+            if token is None:
+                fail("Could not get a token")
 
-    if cmdline_args.encode_xoauth2:
-        print(encode_xoauth2(app_state, token))
-    else:
-        print(token);
+        if cmdline_args.encode_xoauth2:
+            output = encode_xoauth2(app_state, token)
+        else:
+            output = token
 
-    cache = app_state['cache']
-    if cache.has_state_changed:
-        save_token(pass_store, cmdline_args.token_key, cache.serialize())
+        cache = app_state['cache']
+        if cache.has_state_changed:
+            save_token(pass_store, cmdline_args.token_key, cache.serialize())
+
+    print(output)
 
 if __name__ == "__main__":
     main()

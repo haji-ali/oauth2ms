@@ -48,6 +48,11 @@ access token. Call =oauth2ms= with the ~--encode-xoauth2~ to get the token in
 #+begin_src sh
   oauth2ms --auth-key AUTH_KEY --token-key TOKEN_KEY --encode-xoauth2
 #+end_src
+When a mail program calls =oauth2ms= in the background, add
+~--no-interactive~: once the refresh token can no longer be used (after a
+password change, say), it then fails with a message saying how to sign in
+again, rather than opening a browser and waiting for a sign-in nobody is
+there to complete. An interactive sign-in gives up after five minutes.
 Optionally, you can add "https://outlook.office.com/SMTP.Send"
 to the list of scopes to use the token for stmp. See [[steps.org]] for information on configuring emacs for sending mail
 via smtp with xoauth2.
