@@ -175,6 +175,24 @@ https://docs.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-
     return base64.b64encode(xoauth2_bytes).decode("utf-8")
 
 
+def save_token(pass_store, key, data):
+    """Store the token cache under KEY, committing it only if git wants it.
+
+    passpy commits every key it writes, but a token changes on each
+    refresh, so a store may well keep it out of git -- in which case the
+    commit fails, noisily, after the key has been written.
+    """
+    repo = pass_store.repo
+    path = os.path.join(pass_store.store_dir, os.path.normpath(key) + '.gpg')
+    if repo is not None and repo.ignored(path):
+        pass_store.repo = None
+    try:
+        pass_store.set_key(key, data, True)
+    except git.exc.GitCommandError as e:
+        print(e, file=sys.stderr)
+    finally:
+        pass_store.repo = repo
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--auth-key", action="store", default="oauth2ms",
@@ -228,10 +246,7 @@ def main():
 
     cache = app_state['cache']
     if cache.has_state_changed:
-        try:
-            pass_store.set_key(cmdline_args.token_key, cache.serialize(), True)
-        except git.exc.GitCommandError as e:
-            print(e, file=sys.stderr)
+        save_token(pass_store, cmdline_args.token_key, cache.serialize())
 
 if __name__ == "__main__":
     main()
